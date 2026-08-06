@@ -12,3 +12,4 @@ model.pth
 *.pyc
 logs/*
 logs_old/*
+.venv

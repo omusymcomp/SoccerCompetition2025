@@ -1,10 +1,11 @@
 import os
 import requests
-from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import logging
 from itertools import product
+import tempfile
+import zipfile
 
 from process_data import process_data
 
@@ -67,46 +68,68 @@ def download_and_process_file(team, file_name, base_url, save_dir):
     return processed_file
 
 
+def download_and_process_zip(team, base_url, save_dir):
+    """
+    チームごとの zip ファイルをダウンロードして展開し、
+    含まれる tracking.csv を順に加工する。
+    """
+    zip_url = f"{base_url}/{team}_csv.zip"
+    team_dir = os.path.join(save_dir, team)
+    os.makedirs(team_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = os.path.join(tmp_dir, f"{team}.zip")
+
+        try:
+            with requests.get(zip_url, stream=True) as response:
+                response.raise_for_status()
+                with open(zip_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+        except Exception as e:
+            logging.error(f"Error downloading {zip_url}: {e}", exc_info=True)
+            return []
+
+        processed_files = []
+        try:
+            with zipfile.ZipFile(zip_path) as zip_file:
+                for member in zip_file.namelist():
+                    if not member.endswith("tracking.csv"):
+                        continue
+
+                    extracted_path = zip_file.extract(member, path=team_dir)
+                    try:
+                        processed_file = process_file(extracted_path)
+                        processed_files.append(processed_file)
+                        logging.info(f"Processed {extracted_path} -> {processed_file}")
+                    except Exception as e:
+                        logging.error(
+                            f"Error processing {extracted_path}: {e}", exc_info=True
+                        )
+                    finally:
+                        try:
+                            os.remove(extracted_path)
+                        except Exception as e:
+                            logging.error(
+                                f"Error deleting {extracted_path}: {e}", exc_info=True
+                            )
+        except Exception as e:
+            logging.error(f"Error extracting {zip_path}: {e}", exc_info=True)
+            return []
+
+    return processed_files
+
+
 def process_subpath(team, base_url, save_dir, download_num=-1, max_workers=5):
     """
     1つのサブパス（チーム）内で、対象ファイルのダウンロード・加工・削除を並列に処理する。
     ダウンロードするファイル数は download_num で制限可能（-1 の場合は全件）。
     """
-    url = f"{base_url}/{team}/"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-    except Exception as e:
-        logging.error(f"Error accessing {url}: {e}", exc_info=True)
-        return
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    files = [
-        link["href"]
-        for link in soup.find_all("a", href=True)
-        if link["href"].endswith("tracking.csv")
-    ]
+    results = download_and_process_zip(team, base_url, save_dir)
     if download_num != -1:
-        files = files[:download_num]
-
-    logging.info(f"Team {team}: {len(files)} files found.")
-
-    results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                download_and_process_file, team, file_name, base_url, save_dir
-            ): file_name
-            for file_name in files
-        }
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                logging.error(
-                    f"Error in processing a file for team {team}: {e}", exc_info=True
-                )
+        results = results[:download_num]
+    logging.info(f"Team {team}: {len(results)} files processed.")
     return results
 
 
@@ -120,7 +143,7 @@ def process_all_subpaths(base_url, subpaths, save_dir, download_num=-1, max_work
         process_subpath(team, base_url, save_dir, download_num, max_workers)
         logging.info(f"Finished processing team: {team}")
 
-
+# ここから実行される
 teams = [
     "aeteam2024",
     "cyrus2024",
@@ -139,9 +162,9 @@ subpaths = {
 }
 
 process_all_subpaths(
-    base_url="http://alab.ise.ous.ac.jp/robocupdata/rc2024-roundrobin",
+    base_url="https://alab.idsci.nagasaki-u.ac.jp/robocupdata/rc2024-roundrobin",
     subpaths=subpaths,
-    save_dir="robocup2d_data",
+    save_dir="/mnt/data1/yano/work/SoccerCompetition2025/robocup2d_data",
     download_num=-1,
     max_workers=20,
 )
